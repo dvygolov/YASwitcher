@@ -1,0 +1,87 @@
+package main
+
+import (
+	"encoding/json"
+	"os"
+	"path/filepath"
+
+	"github.com/dvygolov/yaswitcher/internal/win"
+)
+
+const (
+	appName    = "YASwitcher"
+	appTitle   = "Yet Another Switcher"
+	runKeyName = "YASwitcher"
+	className  = "YASwitcherWindow"
+)
+
+// Config lives in %APPDATA%\YASwitcher\config.json.
+type Config struct {
+	Hotkey      string `json:"hotkey"`      // "Ctrl+Alt+Space"
+	AltTabMode  bool   `json:"altTabMode"`  // replace the system Alt+Tab with our list
+	AutoStart   bool   `json:"autoStart"`   // start with Windows (HKCU\...\Run)
+	AutoUpdate  bool   `json:"autoUpdate"`  // check for updates in the background
+	DarkTheme   bool   `json:"darkTheme"`   // dark or light overlay
+	ShowMonitor bool   `json:"showMonitor"` // show "monitor N" hint in the header
+	MaxResults  int    `json:"maxResults"`  // how many windows to display
+
+	path string
+}
+
+func defaultConfig() *Config {
+	return &Config{
+		Hotkey:      "Ctrl+Shift+Space",
+		AltTabMode:  false,
+		AutoStart:   true,
+		AutoUpdate:  true,
+		DarkTheme:   true,
+		ShowMonitor: true,
+		MaxResults:  40,
+	}
+}
+
+func configPath() string {
+	dir := os.Getenv("APPDATA")
+	if dir == "" {
+		dir = filepath.Join(os.Getenv("USERPROFILE"), "AppData", "Roaming")
+	}
+	return filepath.Join(dir, appName, "config.json")
+}
+
+func loadConfig() *Config {
+	cfg := defaultConfig()
+	cfg.path = configPath()
+	data, err := os.ReadFile(cfg.path)
+	if err != nil {
+		cfg.save()
+		return cfg
+	}
+	_ = json.Unmarshal(data, cfg)
+	if cfg.MaxResults <= 0 {
+		cfg.MaxResults = 40
+	}
+	if cfg.Hotkey == "" || cfg.Hotkey == "Alt+Space" || cfg.Hotkey == "Ctrl+Alt+Space" {
+		// Alt+Space is the system window menu (errno 1408) and Ctrl+Alt+Space is
+		// taken on many machines (errno 1409); Ctrl+Shift+Space is reliably free.
+		cfg.Hotkey = "Ctrl+Shift+Space"
+	}
+	return cfg
+}
+
+func (c *Config) save() {
+	data, err := json.MarshalIndent(c, "", "  ")
+	if err != nil {
+		return
+	}
+	_ = os.MkdirAll(filepath.Dir(c.path), 0o755)
+	_ = os.WriteFile(c.path, data, 0o644)
+}
+
+// ensureAutoStart applies cfg.AutoStart to the registry. Best effort.
+func (c *Config) ensureAutoStart() {
+	if c.AutoStart {
+		win.SetAutostart(runKeyName, win.ExePath())
+	} else {
+		win.RemoveAutostart(runKeyName)
+	}
+}

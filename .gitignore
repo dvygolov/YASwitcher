@@ -1,0 +1,14 @@
+# build output
+/build/
+*.syso
+*.exe
+# editor / os noise
+.vs/
+.vscode/
+.idea/
+*.user
+*/bin/
+*/obj/
+Thumbs.db
+desktop.ini
+.DS_Store
