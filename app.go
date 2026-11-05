@@ -1,6 +1,8 @@
 package main
 
 import (
+	"runtime"
+
 	"github.com/dvygolov/yaswitcher/internal/win"
 )
 
@@ -45,6 +47,11 @@ func NewApp(cfg *Config) *App {
 // Start creates the hidden window, tray icon, hotkey and keyboard hook, then
 // runs the message loop. Blocks until the app quits.
 func (a *App) Start() {
+	// Win32 windows, hooks and hotkeys are bound to the OS thread that created
+	// them, so pin this goroutine to one thread for the whole message loop.
+	runtime.LockOSThread()
+	defer runtime.UnlockOSThread()
+
 	win.SetProcessDPIAware()
 	win.SetLogHook(logf)
 	win.RegisterClass(className, 0)
@@ -106,13 +113,17 @@ func (a *App) registerHotkey() {
 	if !ok {
 		mods, vk = win.MOD_ALT, win.VK_SPACE
 	}
-	if ok2, errno := win.RegisterHotKey(a.hwnd, a.hotkeyID, mods|win.MOD_NOREPEAT, vk); ok2 {
-		a.hotkeyOn = true
-		logf("hotkey %q registered", a.cfg.Hotkey)
-		return
-	} else {
-		logf("hotkey %q unavailable via RegisterHotKey (%v), using keyboard hook", a.cfg.Hotkey, errno)
+	for attempt := 0; attempt < 5; attempt++ {
+		if ok2, errno := win.RegisterHotKey(a.hwnd, a.hotkeyID, mods|win.MOD_NOREPEAT, vk); ok2 {
+			a.hotkeyOn = true
+			logf("hotkey %q registered (attempt %d)", a.cfg.Hotkey, attempt+1)
+			return
+		} else {
+			logf("hotkey %q attempt %d failed: %v", a.cfg.Hotkey, attempt+1, errno)
+		}
+		win.Sleep(150)
 	}
+	logf("hotkey %q unavailable, using keyboard hook", a.cfg.Hotkey)
 	a.hotkeyViaHook = true
 	a.hotkeyMods = mods
 	a.hotkeyVK = vk

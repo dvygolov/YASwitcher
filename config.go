@@ -32,7 +32,7 @@ func defaultConfig() *Config {
 	return &Config{
 		Hotkey:      "Alt+Space",
 		AltTabMode:  false,
-		AutoStart:   true,
+		AutoStart:   false,
 		AutoUpdate:  true,
 		DarkTheme:   true,
 		ShowMonitor: true,
@@ -77,7 +77,11 @@ func (c *Config) save() {
 	_ = os.WriteFile(c.path, data, 0o644)
 }
 
-// ensureAutoStart applies cfg.AutoStart to the registry. Best effort.
+// ensureAutoStart applies cfg.AutoStart to the registry. The default install
+// autostarts through the "Startup Admin - YASwitcher" scheduled task, so
+// AutoStart is off by default to avoid a double launch. If the user enables the
+// Run-key option explicitly, it is written; otherwise any stale Run entry that
+// points at this exe is removed.
 func (c *Config) ensureAutoStart() {
 	if c.AutoStart {
 		win.SetAutostart(runKeyName, win.ExePath())
