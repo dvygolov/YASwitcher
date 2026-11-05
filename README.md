@@ -4,7 +4,7 @@ A tiny, fast window switcher for Windows — an alternative to the heavyweight
 Alt-Tab replacements. Written in Go against raw Win32, **no CGO**, **no third-party
 dependencies**, a single ~2 MB executable.
 
-![overlay mockup](docs/overlay-mock.html)
+![YASwitcher overlay](docs/screenshot.png)
 
 ## Why another switcher?
 
@@ -22,23 +22,28 @@ dependencies**, a single ~2 MB executable.
 
 | Feature | Notes |
 |---|---|
-| Global hotkey | Default `Ctrl+Shift+Space`, configurable |
+| Global hotkey | Default `Alt+Space`, configurable |
 | Type-to-find | Prefix, substring and fuzzy (subsequence) matching |
 | Alt+Tab replacement | Optional — swallow `Alt+Tab`/`Shift+Tab`, release `Alt` to switch |
 | Multi-monitor | Opens on the monitor under the cursor, shows "Monitor N" |
 | Dark / light theme | Toggle from the tray menu |
-| Autostart | `HKCU\Software\Microsoft\Windows\CurrentVersion\Run` |
+| Autostart | Scheduled Task `Startup Admin - YASwitcher` (highest privileges, at logon) |
 | Tray icon | Click to open, right-click for the menu |
 | Single instance | A second launch does nothing (the first stays in the tray) |
 
 ## Usage
 
 1. Run `yas-switcher.exe`. It appears in the notification area.
-2. Press **Ctrl+Shift+Space** to open the switcher on the monitor under the cursor.
+2. Press **Alt+Space** to open the switcher on the monitor under the cursor.
 3. Type part of a window title or process name to filter.
 4. `↑`/`↓` to choose, `Enter` to switch, `Esc` to cancel.
 5. Right-click the tray icon to change the hotkey, theme, monitor indicator,
    Alt+Tab replacement and autostart, or to exit.
+
+**About Alt+Space.** Windows reserves `Alt+Space` for the window menu, so a plain
+`RegisterHotKey` cannot claim it. YASwitcher first tries the normal registration
+and, if the system refuses, falls back to a low-level keyboard hook — the same
+technique Switcheroo uses. Either way the shortcut works.
 
 ### Replacing the system Alt+Tab
 
@@ -53,7 +58,7 @@ Stored in `%APPDATA%\YASwitcher\config.json`:
 
 ```json
 {
-  "hotkey": "Ctrl+Alt+Space",
+  "hotkey": "Alt+Space",
   "altTabMode": false,
   "autoStart": true,
   "autoUpdate": true,

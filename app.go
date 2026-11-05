@@ -15,6 +15,13 @@ type App struct {
 
 	hotkeyID int32
 	hotkeyOn bool
+	// When RegisterHotKey cannot claim the configured shortcut (e.g. Alt+Space
+	// is reserved by the system), we fall back to matching it in the keyboard
+	// hook. hotkeyMods/hotkeyVK hold the parsed shortcut in that case.
+	hotkeyViaHook bool
+	hotkeyMods    uint32
+	hotkeyVK      uint32
+	hotkeyDown    bool
 
 	// Alt+Tab mode: when the user presses Alt+Tab we swallow the key, show the
 	// list and keep it open while Alt is held. Tab/Shift+Tab move the selection
@@ -39,6 +46,7 @@ func NewApp(cfg *Config) *App {
 // runs the message loop. Blocks until the app quits.
 func (a *App) Start() {
 	win.SetProcessDPIAware()
+	win.SetLogHook(logf)
 	win.RegisterClass(className, 0)
 
 	param := win.NewHandler(a.wndProc)
@@ -90,36 +98,24 @@ func (a *App) setupTray() {
 	a.tray.Add()
 }
 
-// registerHotkey binds the configured shortcut to umHotkey.
-// registerHotkey binds the configured hotkey, falling back to a safe default if
-// the configured one is already taken by another application.
+// registerHotkey binds the configured hotkey. If the system already owns it
+// (Alt+Space is the window menu, errno 1408), the low-level keyboard hook is
+// used instead so the shortcut still works.
 func (a *App) registerHotkey() {
-	candidates := []string{a.cfg.Hotkey, "Ctrl+Shift+Space", "Ctrl+Alt+W", "F9"}
-	seen := map[string]bool{}
-	for _, hk := range candidates {
-		if hk == "" || seen[hk] {
-			continue
-		}
-		seen[hk] = true
-		mods, vk, ok := win.ParseHotkey(hk)
-		if !ok {
-			continue
-		}
-		if ok2, errno := win.RegisterHotKey(a.hwnd, a.hotkeyID, mods|win.MOD_NOREPEAT, vk); ok2 {
-			a.hotkeyOn = true
-			if hk != a.cfg.Hotkey {
-				logf("hotkey %q taken, falling back to %q", hk, a.cfg.Hotkey)
-			}
-			a.cfg.Hotkey = hk
-			a.cfg.save()
-			if a.tray != nil {
-				a.tray.SetTip("YASwitcher — " + win.HotkeyString(mods, vk))
-			}
-			return
-		} else {
-			logf("hotkey %q unavailable: %v", hk, errno)
-		}
+	mods, vk, ok := win.ParseHotkey(a.cfg.Hotkey)
+	if !ok {
+		mods, vk = win.MOD_ALT, win.VK_SPACE
 	}
+	if ok2, errno := win.RegisterHotKey(a.hwnd, a.hotkeyID, mods|win.MOD_NOREPEAT, vk); ok2 {
+		a.hotkeyOn = true
+		logf("hotkey %q registered", a.cfg.Hotkey)
+		return
+	} else {
+		logf("hotkey %q unavailable via RegisterHotKey (%v), using keyboard hook", a.cfg.Hotkey, errno)
+	}
+	a.hotkeyViaHook = true
+	a.hotkeyMods = mods
+	a.hotkeyVK = vk
 }
 
 func (a *App) unregisterHotkey() {
@@ -151,7 +147,7 @@ func (a *App) reRegisterHotkey(hotkey string) bool {
 // installHook installs the low-level keyboard hook that drives Alt+Tab mode.
 // The hook is only active when cfg.AltTabMode is on.
 func (a *App) installHook() {
-	if !a.cfg.AltTabMode {
+	if !a.cfg.AltTabMode && !a.hotkeyViaHook {
 		return
 	}
 	a.hookStop = win.SetKeyFilter(a.keyFilter)
@@ -159,7 +155,33 @@ func (a *App) installHook() {
 
 // keyFilter implements the Alt+Tab interception. Called for every key event.
 func (a *App) keyFilter(vk uint32, down bool, mods uint32) bool {
-	if vk == win.VK_TAB {
+	// Configured shortcut handled through the hook (RegisterHotKey could not
+	// claim it, e.g. Alt+Space). Fire on key down when the modifiers match; the
+	// matching key-up always clears the latch so a missed event cannot wedge it.
+	if a.hotkeyViaHook && vk == a.hotkeyVK {
+		if !down {
+			if a.hotkeyDown {
+				a.hotkeyDown = false
+				return true
+			}
+			return false
+		}
+		const want = win.MOD_ALT | win.MOD_CONTROL | win.MOD_SHIFT
+		if (mods & want) == (a.hotkeyMods & want) {
+			if !a.hotkeyDown {
+				a.hotkeyDown = true
+				win.PostMessage(a.hwnd, umHotkey, 0, 0)
+			}
+			return true
+		}
+		return false
+	}
+	// Safety: if the key went up while modifiers changed, still clear the latch.
+	if a.hotkeyViaHook && !down && a.hotkeyDown {
+		a.hotkeyDown = false
+	}
+
+	if a.cfg.AltTabMode && vk == win.VK_TAB {
 		if down && mods&win.MOD_ALT != 0 {
 			// first press opens; further presses cycle
 			if !a.altHeld {

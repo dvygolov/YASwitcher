@@ -43,6 +43,17 @@ var (
 	trackSticky bool
 )
 
+// logHook is a tiny seam so the app can log hook installation without the win
+// package depending on the app's logger.
+var logHook = func(format string, args ...any) {}
+
+// SetLogHook installs a logging sink for hook diagnostics.
+func SetLogHook(fn func(string, ...any)) {
+	if fn != nil {
+		logHook = fn
+	}
+}
+
 // SetKeyFilter installs a filter and returns a function to remove it. The hook
 // stays installed as long as at least one filter is set; we keep it simple with
 // a single filter since the app only needs one.
@@ -50,7 +61,9 @@ func SetKeyFilter(f KeyFilter) func() {
 	keyFilter = f
 	seedModifiers()
 	if keyHookH == 0 {
-		keyHookH, _, _ = pSetWindowsHookExW.Call(WH_KEYBOARD_LL, keyHookProc, 0, 0)
+		mod := uintptr(GetModuleHandle())
+		keyHookH, _, _ = pSetWindowsHookExW.Call(WH_KEYBOARD_LL, keyHookProc, mod, 0)
+		logHook("SetWindowsHookEx h=%d mod=%d", keyHookH, mod)
 	}
 	return func() {
 		keyFilter = nil
@@ -65,12 +78,10 @@ func keyboardHookProc(nCode int32, wparam, lparam uintptr) uintptr {
 	if nCode == HC_ACTION && keyFilter != nil {
 		kb := (*KBDLLHOOKSTRUCT)(unsafe.Pointer(lparam))
 		down := wparam == WM_KEYDOWN_H || wparam == WM_SYSKEYDOWN_H
-		if kb.Flags&LLKHF_INJECTED == 0 {
-			trackModifier(kb.VkCode, down)
-			mods := trackedModifiers() | Modifiers()
-			if keyFilter(kb.VkCode, down, mods) {
-				return 1 // swallowed
-			}
+		trackModifier(kb.VkCode, down)
+		mods := trackedModifiers() | Modifiers()
+		if keyFilter(kb.VkCode, down, mods) {
+			return 1 // swallowed
 		}
 	}
 	r, _, _ := pCallNextHookEx.Call(keyHookH, uintptr(nCode), wparam, lparam)

@@ -17,7 +17,7 @@ const (
 
 // Config lives in %APPDATA%\YASwitcher\config.json.
 type Config struct {
-	Hotkey      string `json:"hotkey"`      // "Ctrl+Alt+Space"
+	Hotkey      string `json:"hotkey"`      // "Alt+Space"
 	AltTabMode  bool   `json:"altTabMode"`  // replace the system Alt+Tab with our list
 	AutoStart   bool   `json:"autoStart"`   // start with Windows (HKCU\...\Run)
 	AutoUpdate  bool   `json:"autoUpdate"`  // check for updates in the background
@@ -30,7 +30,7 @@ type Config struct {
 
 func defaultConfig() *Config {
 	return &Config{
-		Hotkey:      "Ctrl+Shift+Space",
+		Hotkey:      "Alt+Space",
 		AltTabMode:  false,
 		AutoStart:   true,
 		AutoUpdate:  true,
@@ -60,10 +60,10 @@ func loadConfig() *Config {
 	if cfg.MaxResults <= 0 {
 		cfg.MaxResults = 40
 	}
-	if cfg.Hotkey == "" || cfg.Hotkey == "Alt+Space" || cfg.Hotkey == "Ctrl+Alt+Space" {
-		// Alt+Space is the system window menu (errno 1408) and Ctrl+Alt+Space is
-		// taken on many machines (errno 1409); Ctrl+Shift+Space is reliably free.
-		cfg.Hotkey = "Ctrl+Shift+Space"
+	if cfg.Hotkey == "" || cfg.Hotkey == "Ctrl+Shift+Space" || cfg.Hotkey == "Ctrl+Alt+Space" {
+		// Older builds defaulted to these; Alt+Space is now handled by the
+		// keyboard hook even though the system owns it.
+		cfg.Hotkey = "Alt+Space"
 	}
 	return cfg
 }
