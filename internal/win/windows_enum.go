@@ -36,50 +36,58 @@ func TopLevelWindows() []HWND {
 	return ctx.out
 }
 
-// IsAltTabWindow is the modern equivalent of the lambda Explorer uses for the
-// Alt+Tab list. It deliberately mirrors Switcheroo's AppWindow.IsAltTabWindow.
-func IsAltTabWindow(h HWND) bool {
-	if h == 0 || !h.IsVisible() || !h.IsWindow() {
-		return false
-	}
-	title := h.Title()
-	if title == "" {
-		return false
+// IsAltTabWindow reports whether a window belongs in the switcher list.
+func IsAltTabWindow(h HWND) bool { return altTabRejectReason(h) == "" }
+
+// altTabRejectReason returns why a window is not an Alt-Tab window, or "" when
+// it should be included. Mirrors Switcheroo's AppWindow.IsAltTabWindow.
+func altTabRejectReason(h HWND) string {
+	if h == 0 || !h.IsWindow() {
+		return "no-window"
 	}
 	ex := h.ExStyle()
 	style := h.Style()
 
 	if ex&WS_EX_APPWINDOW != 0 {
-		return true
+		if h.IsCloaked() {
+			return "appwindow-cloaked"
+		}
+		if h.Title() == "" {
+			return "appwindow-notitle"
+		}
+		return ""
+	}
+	if !h.IsVisible() {
+		return "invisible"
+	}
+	if h.Title() == "" {
+		return "empty-title"
 	}
 	if ex&WS_EX_TOOLWINDOW != 0 || style&WS_EX_TOOLWINDOW != 0 {
-		return false
+		return "toolwindow"
 	}
 	if ex&WS_EX_NOACTIVATE != 0 {
-		return false
+		return "noactivate"
 	}
-	// Owned windows that are not their own app window are dialogs of a parent.
 	if owner := h.Owner(); owner != 0 && owner.IsVisible() {
-		return false
+		return "owned"
 	}
 	if h.Prop("ITaskList_Deleted") != 0 {
-		return false
+		return "tasklist-deleted"
 	}
 	cls := h.ClassName()
 	if cls == "Windows.UI.Core.CoreWindow" {
-		return false
+		return "uwp-corewindow"
 	}
 	if cls == "ApplicationFrameWindow" {
-		// UWP shells linger after the app closes. "ApplicationViewCloakType" == 1
-		// means nothing is running; DWM cloaking catches the rest.
 		if cloakType := h.Prop("ApplicationViewCloakType"); cloakType == 1 {
-			return false
+			return "uwp-cloaked-appview"
 		}
 	}
 	if h.IsCloaked() {
-		return false
+		return "cloaked"
 	}
-	return true
+	return ""
 }
 
 // ListWindows returns the Alt-Tab style list, excluding the given process id.
@@ -87,7 +95,7 @@ func ListWindows(selfPID uint32) []WindowInfo {
 	all := TopLevelWindows()
 	out := make([]WindowInfo, 0, len(all))
 	for _, h := range all {
-		if !IsAltTabWindow(h) {
+		if altTabRejectReason(h) != "" {
 			continue
 		}
 		pid := h.PID()

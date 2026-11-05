@@ -15,11 +15,9 @@ import (
 var version = "dev"
 
 func main() {
-	// one copy per session; a second launch just opens the existing switcher
+	// One copy per session: a second launch exits immediately. Autostart via the
+	// scheduled task is the normal entry point, so a duplicate is expected.
 	if !win.SingleInstance("YASwitcher.SingleInstance") {
-		// find the running instance's hidden window by class name and ask it to
-		// open. A FindWindow + custom message would be cleaner, but a tray click
-		// is enough for the common "double launch" case.
 		os.Exit(0)
 	}
 	cfg := loadConfig()

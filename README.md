@@ -24,6 +24,7 @@ dependencies**, a single ~2 MB executable.
 |---|---|
 | Global hotkey | Default `Alt+Space`, configurable |
 | Type-to-find | Prefix, substring and fuzzy (subsequence) matching |
+| Up to 14 rows | Taller panel with a scrollbar; mouse wheel scrolls the list |
 | Alt+Tab replacement | Optional — swallow `Alt+Tab`/`Shift+Tab`, release `Alt` to switch |
 | Multi-monitor | Opens on the monitor under the cursor, shows "Monitor N" |
 | Dark / light theme | Toggle from the tray menu |

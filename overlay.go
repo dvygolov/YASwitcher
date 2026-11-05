@@ -233,7 +233,7 @@ func (o *Overlay) layout(mon win.Monitor) {
 		rows = 1
 	}
 	rowH := win.Scale(rowH, o.dpi)
-	h := win.Scale(headerH, o.dpi) + rowH*int32(min(rows, 9)) + win.Scale(padding*2, o.dpi)
+	h := win.Scale(headerH, o.dpi) + rowH*int32(min(rows, 14)) + win.Scale(padding*2, o.dpi)
 	maxH := win.Scale(maxPanelH, o.dpi)
 	if h > maxH {
 		h = maxH
@@ -352,6 +352,25 @@ func (o *Overlay) draw(dc win.HDC, client win.RECT) {
 	if len(o.rows) == 0 {
 		empty := win.RECT{Left: o.listRect.Left, Top: o.listRect.Top, Right: o.listRect.Right, Bottom: o.listRect.Top + o.rowHeight}
 		win.DrawText(dc, "No matching windows", &empty, win.DT_LEFT|win.DT_VCENTER|win.DT_SINGLELINE|win.DT_NOPREFIX, t.SubText, o.fontRow)
+	}
+
+	// scrollbar: a thin track with a thumb, only when the list overflows.
+	if len(o.rows) > o.visibleRows {
+		trackX := o.listRect.Right - win.Scale(3, o.dpi)
+		track := win.RECT{Left: trackX, Top: o.listRect.Top, Right: trackX + win.Scale(3, o.dpi), Bottom: o.listRect.Bottom}
+		win.FillSolidRound(dc, track, 2, t.BgAlt)
+		thumbH := int32(float32(o.visibleRows) / float32(len(o.rows)) * float32(track.H()))
+		if thumbH < win.Scale(24, o.dpi) {
+			thumbH = win.Scale(24, o.dpi)
+		}
+		maxScroll := len(o.rows) - o.visibleRows
+		frac := 0.0
+		if maxScroll > 0 {
+			frac = float64(o.scroll) / float64(maxScroll)
+		}
+		thumbTop := track.Top + int32(frac*float64(track.H()-thumbH))
+		thumb := win.RECT{Left: trackX, Top: thumbTop, Right: trackX + win.Scale(3, o.dpi), Bottom: thumbTop + thumbH}
+		win.FillSolidRound(dc, thumb, 2, t.SubText)
 	}
 
 	// footer hint
@@ -538,6 +557,15 @@ func (o *Overlay) wndProc(h win.HWND, msg uint32, wp, lp uintptr) uintptr {
 		if i := o.hitTest(pt); i >= 0 {
 			o.sel = i
 			o.activateSelected()
+		}
+		return 0
+	case win.WM_MOUSEWHEEL:
+		// high word of wParam is the signed wheel delta; one notch is 120.
+		delta := int16((wp >> 16) & 0xFFFF)
+		if delta > 0 {
+			o.moveSel(-1)
+		} else if delta < 0 {
+			o.moveSel(1)
 		}
 		return 0
 	case win.WM_KILLFOCUS:
