@@ -99,3 +99,11 @@ func ShellIcon(path string) HICON {
 	}
 	return 0
 }
+
+// LoadAppIcon loads the icon resource #1 from our own executable module, which
+// is where go-winres places it. Returns 0 when the build has no resources.
+func LoadAppIcon() HICON {
+	h, _, _ := pLoadImageW.Call(uintptr(GetModuleHandle()), 1, IMAGE_ICON,
+		0, 0, LR_DEFAULTSIZE)
+	return HICON(h)
+}

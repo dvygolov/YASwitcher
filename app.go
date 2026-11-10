@@ -99,9 +99,14 @@ func (a *App) quit() {
 
 // setupTray registers the notification icon with our app icon.
 func (a *App) setupTray() {
-	exe := win.ExePath()
-	icon := win.ExeIcon(exe)
-	a.tray = win.NewTray(a.hwnd, icon, "YASwitcher — "+win.HotkeyString(hotkeyMods(a.cfg.Hotkey)), win.WM_TRAYICON)
+	icon := win.ExeIcon(win.ExePath())
+	if icon == 0 {
+		// fall back to the icon embedded in our own module (resource #1), which
+		// works even when ExtractIconEx is picky; keeps the tray non-blank.
+		icon = win.LoadAppIcon()
+	}
+	mo, mv := hotkeyMods(a.cfg.Hotkey)
+	a.tray = win.NewTray(a.hwnd, icon, "YASwitcher — "+win.HotkeyString(mo, mv), win.WM_TRAYICON)
 	a.tray.Add()
 }
 

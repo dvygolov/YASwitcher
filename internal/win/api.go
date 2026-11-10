@@ -111,6 +111,7 @@ var (
 	pGetSystemMetrics      = dllUser32.NewProc("GetSystemMetrics")
 	pGetCursorPos          = dllUser32.NewProc("GetCursorPos")
 	pLoadCursorW           = dllUser32.NewProc("LoadCursorW")
+	pLoadImageW            = dllUser32.NewProc("LoadImageW")
 	pSetCursor             = dllUser32.NewProc("SetCursor")
 	pSetWindowRgn          = dllUser32.NewProc("SetWindowRgn")
 	pSetLayeredWindowAttrs = dllUser32.NewProc("SetLayeredWindowAttributes")
