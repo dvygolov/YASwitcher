@@ -200,7 +200,9 @@ func (o *Overlay) Show() {
 	// position the window first, then everything else is client-relative
 	o.hwnd.SetPos(win.HWND_TOPMOST, o.panel.Left, o.panel.Top, o.panel.W(), o.panel.H(), win.SWP_SHOWWINDOW)
 	o.hwnd.Show(win.SW_SHOW)
-	win.SetForegroundWindow(o.hwnd)
+	// Force foreground on the next message-loop iteration so we never block the
+	// (thread-affine) low-level keyboard hook inside Show().
+	win.PostMessage(o.hwnd, win.WM_APP+40, 0, 0)
 	o.hwnd.Invalidate(true)
 }
 
@@ -504,6 +506,9 @@ func (o *Overlay) iconFor(w win.WindowInfo) win.HICON {
 
 func (o *Overlay) wndProc(h win.HWND, msg uint32, wp, lp uintptr) uintptr {
 	switch msg {
+	case win.WM_APP + 40:
+		win.SetForegroundWindow(o.hwnd)
+		return 0
 	case win.WM_PAINT:
 		o.paint(h)
 		return 0
@@ -520,6 +525,46 @@ func (o *Overlay) wndProc(h win.HWND, msg uint32, wp, lp uintptr) uintptr {
 			return 0
 		}
 		return 0
+	case win.WM_SYSKEYDOWN:
+		// Alt is held and a key was pressed: Alt+Space must cycle the list, and
+		// Alt+Tab steps it. Handling this here (the overlay has focus) avoids
+		// depending on the global hook staying alive while the panel is open.
+		if wp == win.VK_SPACE {
+			o.app.cycleStep()
+			return 0
+		}
+		if wp == win.VK_TAB {
+			if o.app.altShiftHeld() {
+				o.moveSel(-1)
+			} else {
+				o.moveSel(1)
+			}
+			return 0
+		}
+		return win.DefWindowProc(h, msg, wp, lp)
+	case win.WM_SYSKEYUP:
+		// Alt released while the overlay is open: commit if we were cycling.
+		if wp == win.VK_MENU || wp == win.VK_LMENU || wp == win.VK_RMENU {
+			o.app.holdAltReleased()
+			return 0
+		}
+		// Space released: clear the press latch so the next press cycles again.
+		if wp == win.VK_SPACE {
+			o.app.releaseHotkeyKey()
+			return 0
+		}
+		return win.DefWindowProc(h, msg, wp, lp)
+	case win.WM_KEYUP:
+		// Alt's own release can arrive as a plain WM_KEYUP for VK_MENU.
+		if wp == win.VK_MENU || wp == win.VK_LMENU || wp == win.VK_RMENU {
+			o.app.holdAltReleased()
+			return 0
+		}
+		if wp == win.VK_SPACE {
+			o.app.releaseHotkeyKey()
+			return 0
+		}
+		return win.DefWindowProc(h, msg, wp, lp)
 	case win.WM_KEYDOWN:
 		switch wp {
 		case win.VK_ESCAPE:
@@ -569,7 +614,11 @@ func (o *Overlay) wndProc(h win.HWND, msg uint32, wp, lp uintptr) uintptr {
 		}
 		return 0
 	case win.WM_KILLFOCUS:
-		o.app.cancelOverlay()
+		// Keep the overlay alive while the user holds Alt and cycles; only a
+		// real focus loss (click elsewhere, no gesture) dismisses it.
+		if !o.app.inHoldGesture() {
+			o.app.cancelOverlay()
+		}
 		return 0
 	case win.WM_CLOSE:
 		o.app.cancelOverlay()
@@ -663,3 +712,27 @@ func itoa(v int64) string {
 	}
 	return string(b[i:])
 }
+
+// setSel moves the selection to an absolute index (clamped) and keeps it in view.
+func (o *Overlay) setSel(i int) {
+	if len(o.rows) == 0 {
+		return
+	}
+	if i < 0 {
+		i = 0
+	}
+	if i >= len(o.rows) {
+		i = len(o.rows) - 1
+	}
+	o.sel = i
+	if o.sel < o.scroll {
+		o.scroll = o.sel
+	}
+	if o.sel >= o.scroll+o.visibleRows {
+		o.scroll = o.sel - o.visibleRows + 1
+	}
+	o.hwnd.Invalidate(true)
+}
+
+// RowCount returns how many rows are currently listed.
+func (o *Overlay) RowCount() int { return len(o.rows) }

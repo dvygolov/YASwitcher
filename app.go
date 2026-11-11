@@ -3,6 +3,7 @@ package main
 import (
 	"runtime"
 
+	"github.com/dvygolov/yaswitcher/internal/gesture"
 	"github.com/dvygolov/yaswitcher/internal/win"
 )
 
@@ -23,7 +24,6 @@ type App struct {
 	hotkeyViaHook bool
 	hotkeyMods    uint32
 	hotkeyVK      uint32
-	hotkeyDown    bool
 
 	// Alt+Tab mode: when the user presses Alt+Tab we swallow the key, show the
 	// list and keep it open while Alt is held. Tab/Shift+Tab move the selection
@@ -32,15 +32,27 @@ type App struct {
 	altMode  bool
 	hookStop func()
 
+	// ges is the pure hold-to-cycle state machine for the main hotkey.
+	ges gesture.State
+
 	quitting bool
 }
 
 const (
-	umHotkey = win.WM_APP + 10
+	umHotkey     = win.WM_APP + 10
+	umOpen       = win.WM_APP + 11
+	umCycle      = win.WM_APP + 12
+	umClose      = win.WM_APP + 13
+	umCommit     = win.WM_APP + 14
+	umAltTabOpen = win.WM_APP + 15
+	umAltTabStep = win.WM_APP + 16
 )
 
 func NewApp(cfg *Config) *App {
 	a := &App{cfg: cfg, hotkeyID: 1}
+	// Seed the gesture machine with whether the hotkey uses Alt.
+	mods, _, _ := win.ParseHotkey(cfg.Hotkey)
+	a.ges = gesture.New(mods&win.MOD_ALT != 0)
 	return a
 }
 
@@ -113,25 +125,23 @@ func (a *App) setupTray() {
 // registerHotkey binds the configured hotkey. If the system already owns it
 // (Alt+Space is the window menu, errno 1408), the low-level keyboard hook is
 // used instead so the shortcut still works.
+// registerHotkey parses the configured shortcut and prepares it to be handled
+// through the low-level keyboard hook. The hook (rather than RegisterHotKey) is
+// used so we can observe the Alt modifier being released, which drives the
+// hold-to-cycle gesture. A best-effort RegisterHotKey is still attempted as a
+// fallback for the case where the hook cannot be installed.
 func (a *App) registerHotkey() {
 	mods, vk, ok := win.ParseHotkey(a.cfg.Hotkey)
 	if !ok {
 		mods, vk = win.MOD_ALT, win.VK_SPACE
 	}
-	for attempt := 0; attempt < 5; attempt++ {
-		if ok2, errno := win.RegisterHotKey(a.hwnd, a.hotkeyID, mods|win.MOD_NOREPEAT, vk); ok2 {
-			a.hotkeyOn = true
-			logf("hotkey %q registered (attempt %d)", a.cfg.Hotkey, attempt+1)
-			return
-		} else {
-			logf("hotkey %q attempt %d failed: %v", a.cfg.Hotkey, attempt+1, errno)
-		}
-		win.Sleep(150)
-	}
-	logf("hotkey %q unavailable, using keyboard hook", a.cfg.Hotkey)
-	a.hotkeyViaHook = true
 	a.hotkeyMods = mods
 	a.hotkeyVK = vk
+	a.hotkeyViaHook = true
+	if a.hookStop == nil {
+		a.hookStop = win.SetKeyFilter(a.keyFilter)
+	}
+	logf("hotkey %q handled via keyboard hook (mods=%#x vk=%#x)", a.cfg.Hotkey, mods, vk)
 }
 
 func (a *App) unregisterHotkey() {
@@ -147,11 +157,14 @@ func (a *App) reRegisterHotkey(hotkey string) bool {
 	if !ok {
 		return false
 	}
-	a.unregisterHotkey()
-	if ok2, _ := win.RegisterHotKey(a.hwnd, a.hotkeyID, mods|win.MOD_NOREPEAT, vk); !ok2 {
-		return false
+	a.hotkeyMods = mods
+	a.hotkeyVK = vk
+	a.hotkeyViaHook = true
+	// Recreate the gesture machine so its wantAlt matches the new hotkey.
+	a.ges = gesture.New(mods&win.MOD_ALT != 0)
+	if a.hookStop == nil {
+		a.hookStop = win.SetKeyFilter(a.keyFilter)
 	}
-	a.hotkeyOn = true
 	a.cfg.Hotkey = hotkey
 	a.cfg.save()
 	if a.tray != nil {
@@ -163,79 +176,151 @@ func (a *App) reRegisterHotkey(hotkey string) bool {
 // installHook installs the low-level keyboard hook that drives Alt+Tab mode.
 // The hook is only active when cfg.AltTabMode is on.
 func (a *App) installHook() {
-	if !a.cfg.AltTabMode && !a.hotkeyViaHook {
-		return
+	// The hook is always installed for the main hotkey; Alt+Tab mode just adds
+	// behaviour to the same filter.
+	if a.hookStop == nil {
+		a.hookStop = win.SetKeyFilter(a.keyFilter)
 	}
-	a.hookStop = win.SetKeyFilter(a.keyFilter)
 }
 
 // keyFilter implements the Alt+Tab interception. Called for every key event.
 func (a *App) keyFilter(vk uint32, down bool, mods uint32) bool {
-	// Configured shortcut handled through the hook (RegisterHotKey could not
-	// claim it, e.g. Alt+Space). Fire on key down when the modifiers match; the
-	// matching key-up always clears the latch so a missed event cannot wedge it.
-	if a.hotkeyViaHook && vk == a.hotkeyVK {
+	// IMPORTANT: this runs inside a WH_KEYBOARD_LL callback. Windows silently
+	// removes a low-level hook whose callback takes too long (LowLevelHooksTimeout,
+	// ~300ms), so it must stay cheap: only update state and post a message. All
+	// heavy work happens on the message loop in wndProc.
+	//
+	// Division of labour:
+	//   overlay CLOSED -> the hook detects the hotkey combo and opens it.
+	//   overlay OPEN   -> the overlay window itself has focus and handles
+	//                     Alt+Space (cycle), Alt release (commit) and Esc via its
+	//                     own window messages. The hook then ignores the hotkey so
+	//                     the key reaches the window and is not double handled.
+	isAlt := vk == win.VK_MENU || vk == win.VK_LMENU || vk == win.VK_RMENU
+	if isAlt {
+		a.ges.SetAlt(down)
 		if !down {
-			if a.hotkeyDown {
-				a.hotkeyDown = false
-				return true
+			if a.altHeld {
+				a.altHeld = false
+				return true // Alt+Tab commit handled in wndProc
+			}
+			// Only the hook commits when the overlay is closed (nothing to do);
+			// when open, the overlay's WM_SYSKEYUP handles it.
+			if !a.ges.OverlayOpen() {
+				a.ges.AltReleased()
 			}
 			return false
 		}
+	}
+
+	// Escape closes a hook-opened overlay even if it somehow lost focus.
+	if a.ges.OverlayOpen() && vk == win.VK_ESCAPE && down {
+		win.PostMessage(a.hwnd, umClose, 0, 0)
+		a.ges.SetOpen(false)
+		return true
+	}
+
+	// --- main hotkey (e.g. Alt+Space) ---
+	if a.hotkeyViaHook && vk == a.hotkeyVK {
 		const want = win.MOD_ALT | win.MOD_CONTROL | win.MOD_SHIFT
-		if (mods & want) == (a.hotkeyMods & want) {
-			if !a.hotkeyDown {
-				a.hotkeyDown = true
-				win.PostMessage(a.hwnd, umHotkey, 0, 0)
+		matches := (mods & want) == (a.hotkeyMods & want)
+
+		if a.ges.OverlayOpen() {
+			// Overlay is open: let its window handle the key. Alt+Space arrives
+			// there as WM_SYSKEYDOWN. Do not swallow, so it reaches the window.
+			return false
+		}
+		if !down {
+			return false
+		}
+		if matches {
+			a.ges.SetAlt(a.hotkeyMods&win.MOD_ALT != 0 && mods&win.MOD_ALT != 0)
+			if a.ges.KeyDown() == gesture.Open {
+				win.PostMessage(a.hwnd, umOpen, 0, 0)
 			}
+			a.ges.KeyUp()
 			return true
 		}
 		return false
 	}
-	// Safety: if the key went up while modifiers changed, still clear the latch.
-	if a.hotkeyViaHook && !down && a.hotkeyDown {
-		a.hotkeyDown = false
-	}
 
+	// --- optional Alt+Tab replacement ---
 	if a.cfg.AltTabMode && vk == win.VK_TAB {
 		if down && mods&win.MOD_ALT != 0 {
-			// first press opens; further presses cycle
 			if !a.altHeld {
 				a.altHeld = true
 				a.altMode = true
-				a.showOverlay()
-				if mods&win.MOD_SHIFT != 0 {
-					a.overlay.moveSel(-1)
-				}
+				win.PostMessage(a.hwnd, umAltTabOpen, 0, uintptr(mods))
 			} else {
-				if mods&win.MOD_SHIFT != 0 {
-					a.overlay.moveSel(-1)
-				} else {
-					a.overlay.moveSel(1)
-				}
+				win.PostMessage(a.hwnd, umAltTabStep, 0, uintptr(mods))
 			}
 			return true
 		}
 		if !down && a.altHeld {
 			return true
 		}
-	}
-	if vk == win.VK_MENU || vk == win.VK_LMENU || vk == win.VK_RMENU {
-		if !down && a.altHeld {
-			// Alt released: commit the selection
-			a.altHeld = false
-			if a.overlay != nil && a.overlay.IsVisible() {
-				a.commitAltMode()
-			}
-			return true
-		}
-	}
-	if vk == win.VK_ESCAPE && down && a.altHeld {
-		a.altHeld = false
-		a.cancelOverlay()
-		return true
 	}
 	return false
+}
+
+// handleOpen opens the overlay on the message loop.
+func (a *App) handleOpen() {
+	if a.overlay != nil && a.overlay.IsVisible() {
+		return
+	}
+	a.showOverlay()
+}
+
+// handleCycle moves the selection one step down, wrapping.
+func (a *App) handleCycle() {
+	if a.overlay == nil {
+		return
+	}
+	if a.overlay.sel >= a.overlay.RowCount()-1 {
+		a.overlay.setSel(0)
+	} else {
+		a.overlay.moveSel(1)
+	}
+}
+
+// cycleStep advances the hold gesture by one step (called from the overlay's
+// own WM_SYSKEYDOWN while Alt is held). The matching key-up clears the latch.
+func (a *App) cycleStep() {
+	a.ges.SetAlt(true)
+	switch a.ges.KeyDown() {
+	case gesture.Cycle:
+		a.handleCycle()
+	case gesture.Open:
+		a.handleOpen()
+	}
+}
+
+// releaseHotkeyKey clears the press latch on the main key release.
+func (a *App) releaseHotkeyKey() { a.ges.KeyUp() }
+
+// holdAltReleased commits the hold gesture when the overlay handles Alt release.
+func (a *App) holdAltReleased() {
+	a.ges.SetAlt(false)
+	switch a.ges.AltReleased() {
+	case gesture.Commit:
+		a.commitHoldMode()
+	}
+}
+
+// inHoldGesture reports whether a hold-to-cycle gesture is in progress.
+func (a *App) inHoldGesture() bool { return a.ges.Cycling() && a.ges.AltHeld() }
+
+// altShiftHeld reports whether Shift is down (for Alt+Tab direction).
+func (a *App) altShiftHeld() bool { return win.Modifiers()&win.MOD_SHIFT != 0 }
+
+// commitHoldMode switches to the currently selected window and closes.
+func (a *App) commitHoldMode() {
+	if a.overlay == nil || !a.overlay.IsVisible() {
+		a.ges.SetOpen(false)
+		return
+	}
+	a.ges.SetOpen(false)
+	a.overlay.activateSelected()
 }
 
 // commitAltMode switches to the selected window and closes the overlay.
@@ -255,6 +340,7 @@ func (a *App) commitAltMode() {
 func (a *App) showOverlay() {
 	if a.overlay != nil {
 		a.overlay.Show()
+		a.ges.SetOpen(true)
 	}
 }
 
@@ -263,6 +349,7 @@ func (a *App) cancelOverlay() {
 	if a.overlay != nil {
 		a.overlay.Hide()
 	}
+	a.ges.SetOpen(false)
 }
 
 // switchTo focuses the chosen window. If it is minimized it is restored first.
@@ -294,6 +381,36 @@ func (a *App) wndProc(h win.HWND, msg uint32, wp, lp uintptr) uintptr {
 		return 0
 	case umHotkey:
 		a.toggleFromHotkey()
+		return 0
+	case umOpen:
+		a.handleOpen()
+		return 0
+	case umCycle:
+		a.handleCycle()
+		return 0
+	case umClose:
+		a.cancelOverlay()
+		return 0
+	case umCommit:
+		a.commitHoldMode()
+		return 0
+	case umAltTabOpen:
+		a.showOverlay()
+		if wp&uintptr(win.MOD_SHIFT) != 0 && a.overlay != nil {
+			// not used; shift handled via message param
+		}
+		if a.overlay != nil && uint32(lp)&win.MOD_SHIFT != 0 {
+			a.overlay.moveSel(-1)
+		}
+		return 0
+	case umAltTabStep:
+		if a.overlay != nil {
+			if uint32(lp)&win.MOD_SHIFT != 0 {
+				a.overlay.moveSel(-1)
+			} else {
+				a.overlay.moveSel(1)
+			}
+		}
 		return 0
 	case win.WM_TRAYICON:
 		switch uint32(lp) & 0xFFFF {
